@@ -1,4 +1,4 @@
-name: Reusable - OpenTofu Apply
+name: Reusable - Terraform Apply
 
 on: 
   workflow_call:
@@ -28,7 +28,7 @@ on:
         required: true
         type: string
       WORKING_DIR:
-        description: 'The working directory for OpenTofu'
+        description: 'The working directory for Terraform'
         required: true
         type: string
     secrets:
@@ -45,8 +45,8 @@ permissions:
   actions: read
 
 jobs:
-  opentofu_apply:
-    name: OpenTofu Apply
+  terraform_apply:
+    name: Terraform Apply
     runs-on: ubuntu-latest
     timeout-minutes: 45
     environment: ${{ inputs.CLOUD_ENVIRONMENT }}
@@ -54,11 +54,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4.1.7
 
-      - name: Setup OpenTofu
-        uses: opentofu/setup-opentofu@v1.0.4
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2.0.3
         with:
-          tofu_version: 1.8.4
-          tofu_wrapper: false
+          terraform_version: 1.9.8
+          terraform_wrapper: false
 
       - name: Azure Login using OIDC
         uses: azure/login@v2.2.0
@@ -67,7 +67,7 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Set Azure Environment Variables for OpenTofu
+      - name: Set Azure Environment Variables for Terraform
         run: |
           echo "ARM_CLIENT_ID=${{ secrets.AZURE_CLIENT_ID }}" >> $GITHUB_ENV
           echo "ARM_TENANT_ID=${{ secrets.AZURE_TENANT_ID }}" >> $GITHUB_ENV
@@ -102,7 +102,7 @@ jobs:
         if: steps.find_pr.outputs.found_pr == 'true'
         uses: dawidd6/action-download-artifact@bf251b5aa9c2f7eeb574a96ee720e24f801b7c11 # v3.1.4
         with:
-          name: opentofu-plan-${{ steps.find_pr.outputs.pr_number }}
+          name: terraform-plan-${{ steps.find_pr.outputs.pr_number }}
           path: ${{ inputs.WORKING_DIR }}
           workflow: ${{ github.workflow_id }}
           pr: ${{ steps.find_pr.outputs.pr_number }}
@@ -135,22 +135,22 @@ jobs:
           # Wait for firewall rule to propagate
           sleep 30
 
-      - name: OpenTofu Initialize
+      - name: Terraform Initialize
         if: steps.check_plan.outputs.plan_exists == 'true'
         working-directory: ${{ inputs.WORKING_DIR }}
         timeout-minutes: 10
         run: |
-          tofu init \
+          terraform init \
             -backend-config="resource_group_name=${{ inputs.TF_STATE_RG }}" \
             -backend-config="storage_account_name=${{ inputs.TF_STATE_SA }}" \
             -backend-config="container_name=${{ inputs.TF_STATE_CONTAINER }}" \
             -backend-config="key=${{ inputs.TF_STATE_KEY }}"
 
-      - name: OpenTofu Apply
+      - name: Terraform Apply
         if: steps.check_plan.outputs.plan_exists == 'true'
         working-directory: ${{ inputs.WORKING_DIR }}
         timeout-minutes: 30
-        run: tofu apply -auto-approve tfplan
+        run: terraform apply -auto-approve tfplan
 
       - name: Remove Firewall Rule from Storage Account
         if: always() && steps.check_plan.outputs.plan_exists == 'true' && steps.get_ip.outputs.runner_ip != ''

@@ -197,11 +197,43 @@ jobs:
         if: env.PLAN_CHANGES == 'true'
         working-directory: ${{ inputs.WORKING_DIR }}
         run: |
-          terraform show -no-color tfplan > plan_output.txt
-          echo "## Terraform Plan Output" >> $GITHUB_STEP_SUMMARY
-          echo "```" >> $GITHUB_STEP_SUMMARY
-          cat plan_output.txt >> $GITHUB_STEP_SUMMARY
-          echo "```" >> $GITHUB_STEP_SUMMARY
+          echo "Generating plan output for summary..."
+          
+          # Generate plan output with error handling
+          if terraform show -no-color tfplan > plan_output.txt 2>&1; then
+            echo "Plan output generated successfully"
+            
+            # Check file size and truncate if necessary (GitHub summary limit ~65KB)
+            PLAN_SIZE=$(wc -c < plan_output.txt)
+            echo "Plan output size: $PLAN_SIZE bytes"
+            
+            if [ $PLAN_SIZE -gt 50000 ]; then
+              echo "Plan output too large, truncating..."
+              head -c 45000 plan_output.txt > plan_output_truncated.txt
+              echo "" >> plan_output_truncated.txt
+              echo "... [Output truncated - full plan available in artifact]" >> plan_output_truncated.txt
+              cp plan_output_truncated.txt plan_output.txt
+            fi
+            
+            # Write to step summary with proper markdown
+            {
+              echo "## Terraform Plan Output"
+              echo ""
+              echo '```hcl'
+              cat plan_output.txt
+              echo '```'
+              echo ""
+              echo "📋 Full plan file available in workflow artifacts as \`terraform-plan-${{ inputs.PULL_REQUEST_NUMBER }}\`"
+            } >> $GITHUB_STEP_SUMMARY
+            
+            echo "Plan output added to step summary"
+          else
+            echo "ERROR: Failed to generate plan output"
+            echo "## Terraform Plan Output" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "❌ Failed to generate plan output. Check workflow logs for details." >> $GITHUB_STEP_SUMMARY
+            cat plan_output.txt >> $GITHUB_STEP_SUMMARY
+          fi
 
       - name: Upload Plan Artifact
         if: env.PLAN_CHANGES == 'true'

@@ -48,6 +48,10 @@ permissions:
   contents: read
   actions: read
 
+concurrency:
+  group: storage-access-${{ inputs.TF_STATE_SA }}
+  cancel-in-progress: false
+
 jobs:
   terraform_plan:
     runs-on: ubuntu-latest

@@ -64,6 +64,10 @@ permissions:
   id-token: write
   contents: read
 
+concurrency:
+  group: storage-access-${{ inputs.TF_STATE_SA }}
+  cancel-in-progress: false
+
 jobs:
   verify_backend:
     runs-on: ubuntu-latest

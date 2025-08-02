@@ -1,4 +1,4 @@
-name: Reusable - OpenTofu Plan
+name: Reusable - Terraform Apply
 
 on: 
   workflow_call:
@@ -23,12 +23,12 @@ on:
         description: 'Azure Blob Storage Key for Terraform state file'
         required: true
         type: string
-      PULL_REQUEST_NUMBER:
-        description: 'Pull request number'
+      HEAD_COMMIT_MESSAGE:
+        description: 'The head commit message'
         required: true
         type: string
       WORKING_DIR:
-        description: 'The working directory for OpenTofu'
+        description: 'The working directory for Terraform'
         required: true
         type: string
     secrets:
@@ -38,10 +38,6 @@ on:
         required: true
       AZURE_SUBSCRIPTION_ID:
         required: true
-    outputs:
-      plan_changes:
-        description: "Indicates if the OpenTofu plan has changes"
-        value: ${{ jobs.opentofu_plan.outputs.plan_changes }}
 
 permissions:
   id-token: write
@@ -53,21 +49,20 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  opentofu_plan:
+  terraform_apply:
+    name: Terraform Apply
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     environment: ${{ inputs.CLOUD_ENVIRONMENT }}
-    outputs:
-      plan_changes: ${{ steps.plan.outputs.plan_changes }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4.1.7
 
-      - name: Setup OpenTofu
-        uses: opentofu/setup-opentofu@v1
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2.0.3
         with:
-          tofu_version: 1.8.4
-          tofu_wrapper: false
+          terraform_version: 1.9.8
+          terraform_wrapper: false
 
       - name: Azure Login using OIDC
         uses: azure/login@v2.2.0
@@ -76,7 +71,7 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Set Azure Environment Variables for OpenTofu
+      - name: Set Azure Environment Variables for Terraform
         run: |
           echo "ARM_CLIENT_ID=${{ secrets.AZURE_CLIENT_ID }}" >> $GITHUB_ENV
           echo "ARM_TENANT_ID=${{ secrets.AZURE_TENANT_ID }}" >> $GITHUB_ENV
@@ -85,16 +80,52 @@ jobs:
           echo "TF_VAR_remote_state_subscription_id=${{ secrets.AZURE_SUBSCRIPTION_ID }}" >> $GITHUB_ENV
           echo "TF_VAR_remote_state_tenant_id=${{ secrets.AZURE_TENANT_ID }}" >> $GITHUB_ENV
 
-      - name: OpenTofu Format Check
-        working-directory: ${{ inputs.WORKING_DIR }}
-        timeout-minutes: 5
+      - name: Find PR number from merge commit
+        id: find_pr
         run: |
-          echo "Running opentofu format check on ${{ inputs.WORKING_DIR }}"
-          tofu fmt -check
-          echo "All files are properly formatted." 
+          # Try to find PR number from standard merge commit message
+          pr_number=$(echo "${{ inputs.HEAD_COMMIT_MESSAGE }}" | grep -oP '(?<=Merge pull request #)\d+' || true)
+
+          # If not found, try to find PR number from squash merge commit message
+          if [ -z "$pr_number" ]; then
+            pr_number=$(echo "${{ inputs.HEAD_COMMIT_MESSAGE }}" | grep -oP '(?<=#)\d+(?=\)$)' || true)
+          fi
+
+          if [ -z "$pr_number" ]; then
+            echo "Could not determine PR number from commit message."
+            echo "found_pr=false" >> $GITHUB_OUTPUT
+          else
+            echo "Found PR number: $pr_number"
+            echo "found_pr=true" >> $GITHUB_OUTPUT
+            echo "pr_number=$pr_number" >> $GITHUB_OUTPUT
+          fi
+        shell: bash
+
+      - name: Download Plan Artifact
+        id: download_artifact
+        if: steps.find_pr.outputs.found_pr == 'true'
+        uses: dawidd6/action-download-artifact@bf251b5aa9c2f7eeb574a96ee720e24f801b7c11 # v3.1.4
+        with:
+          name: terraform-plan-${{ steps.find_pr.outputs.pr_number }}
+          path: ${{ inputs.WORKING_DIR }}
+          workflow: ${{ github.workflow_id }}
+          pr: ${{ steps.find_pr.outputs.pr_number }}
+          workflow_conclusion: success
+          if_no_artifact_found: 'ignore'
+          
+      - name: Check for Plan File
+        id: check_plan
+        run: |
+          if [ -f "${{ inputs.WORKING_DIR }}/tfplan" ]; then
+            echo "plan_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "No plan found. Skipping apply."
+            echo "plan_exists=false" >> $GITHUB_OUTPUT
+          fi
 
       - name: Get Runner IP Address with Retry
         id: get_ip
+        if: steps.check_plan.outputs.plan_exists == 'true'
         run: |
           MAX_RETRIES=5
           RETRY_COUNT=0
@@ -121,6 +152,7 @@ jobs:
           exit 1
 
       - name: Add Firewall Rule to Storage Account
+        if: steps.check_plan.outputs.plan_exists == 'true'
         run: |
           echo "Adding firewall rule for IP: ${{ steps.get_ip.outputs.runner_ip }}"
           
@@ -158,93 +190,25 @@ jobs:
           
           echo "WARNING: Firewall rule may not be fully propagated, but continuing..."
 
-      - name: OpenTofu Initialize
+      - name: Terraform Initialize
+        if: steps.check_plan.outputs.plan_exists == 'true'
         working-directory: ${{ inputs.WORKING_DIR }}
         timeout-minutes: 10
         run: |
-          tofu init \
+          terraform init \
             -backend-config="resource_group_name=${{ inputs.TF_STATE_RG }}" \
             -backend-config="storage_account_name=${{ inputs.TF_STATE_SA }}" \
             -backend-config="container_name=${{ inputs.TF_STATE_CONTAINER }}" \
             -backend-config="key=${{ inputs.TF_STATE_KEY }}"
 
-      - name: OpenTofu Validate
+      - name: Terraform Apply
+        if: steps.check_plan.outputs.plan_exists == 'true'
         working-directory: ${{ inputs.WORKING_DIR }}
-        timeout-minutes: 5
-        run: tofu validate
-
-      - name: OpenTofu Plan
-        id: plan
-        working-directory: ${{ inputs.WORKING_DIR }}
-        timeout-minutes: 15
-        run: |
-          echo "Running tofu plan on ${{ inputs.WORKING_DIR }}"
-          tofu plan -out=tfplan -detailed-exitcode || exit_code=$?
-          if [ $exit_code -eq 1 ]; then
-            echo "OpenTofu plan failed"
-            exit 1
-          elif [ $exit_code -eq 2 ]; then
-            echo "OpenTofu plan succeeded with changes"
-            echo "PLAN_CHANGES=true" >> $GITHUB_ENV
-            echo "plan_changes=true" >> $GITHUB_OUTPUT
-          else
-            echo "OpenTofu plan succeeded with no changes"
-            echo "PLAN_CHANGES=false" >> $GITHUB_ENV
-            echo "plan_changes=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Save Plan Output
-        if: env.PLAN_CHANGES == 'true'
-        working-directory: ${{ inputs.WORKING_DIR }}
-        run: |
-          echo "Generating plan output for summary..."
-          
-          # Generate plan output with error handling
-          if tofu show -no-color tfplan > plan_output.txt 2>&1; then
-            echo "Plan output generated successfully"
-            
-            # Check file size and truncate if necessary (GitHub summary limit ~65KB)
-            PLAN_SIZE=$(wc -c < plan_output.txt)
-            echo "Plan output size: $PLAN_SIZE bytes"
-            
-            if [ $PLAN_SIZE -gt 50000 ]; then
-              echo "Plan output too large, truncating..."
-              head -c 45000 plan_output.txt > plan_output_truncated.txt
-              echo "" >> plan_output_truncated.txt
-              echo "... [Output truncated - full plan available in artifact]" >> plan_output_truncated.txt
-              cp plan_output_truncated.txt plan_output.txt
-            fi
-            
-            # Write to step summary with proper markdown
-            {
-              echo "## OpenTofu Plan Output"
-              echo ""
-              echo '```hcl'
-              cat plan_output.txt
-              echo '```'
-              echo ""
-              echo "📋 Full plan file available in workflow artifacts as \`opentofu-plan-${{ inputs.PULL_REQUEST_NUMBER }}\`"
-            } >> $GITHUB_STEP_SUMMARY
-            
-            echo "Plan output added to step summary"
-          else
-            echo "ERROR: Failed to generate plan output"
-            echo "## OpenTofu Plan Output" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "❌ Failed to generate plan output. Check workflow logs for details." >> $GITHUB_STEP_SUMMARY
-            cat plan_output.txt >> $GITHUB_STEP_SUMMARY
-          fi
-
-      - name: Upload Plan Artifact
-        if: env.PLAN_CHANGES == 'true'
-        uses: actions/upload-artifact@v4.4.3
-        with:
-          name: opentofu-plan-${{ inputs.PULL_REQUEST_NUMBER }}
-          path: ${{ inputs.WORKING_DIR }}/tfplan
-          retention-days: 7
+        timeout-minutes: 30
+        run: terraform apply -auto-approve tfplan
 
       - name: Remove Firewall Rule from Storage Account
-        if: always() && steps.get_ip.outputs.runner_ip != ''
+        if: always() && steps.check_plan.outputs.plan_exists == 'true' && steps.get_ip.outputs.runner_ip != ''
         run: |
           echo "Removing firewall rule for IP: ${{ steps.get_ip.outputs.runner_ip }}"
           

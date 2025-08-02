@@ -21,6 +21,14 @@
         "https://gitmcp.io/opentofu/terraform-provider-azurerm"
       ]
     },
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/home/freyr/homeprojects/ot-azure"
+      ]
+    },
     "terraform": {
       "command": "docker",
       "args": [

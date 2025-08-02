@@ -89,19 +89,70 @@ jobs:
           tofu fmt -check
           echo "All files are properly formatted." 
 
-      - name: Get Runner IP Address
+      - name: Get Runner IP Address with Retry
         id: get_ip
-        run: echo "runner_ip=$(curl -s https://api.ipify.org)" >> $GITHUB_OUTPUT
+        run: |
+          MAX_RETRIES=5
+          RETRY_COUNT=0
+          
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            echo "Attempt $((RETRY_COUNT + 1)) to get runner IP address..."
+            RUNNER_IP=$(curl -s --connect-timeout 10 --max-time 30 https://api.ipify.org 2>/dev/null || true)
+            
+            if [[ "$RUNNER_IP" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+              echo "Successfully retrieved IP: $RUNNER_IP"
+              echo "runner_ip=$RUNNER_IP" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+              SLEEP_TIME=$((2 ** RETRY_COUNT))
+              echo "Failed to get valid IP address. Retrying in ${SLEEP_TIME} seconds..."
+              sleep $SLEEP_TIME
+            fi
+          done
+          
+          echo "ERROR: Failed to retrieve runner IP address after $MAX_RETRIES attempts"
+          exit 1
 
       - name: Add Firewall Rule to Storage Account
         run: |
-          az storage account network-rule add \
+          echo "Adding firewall rule for IP: ${{ steps.get_ip.outputs.runner_ip }}"
+          
+          # Add the firewall rule with error handling
+          if ! az storage account network-rule add \
             --account-name ${{ inputs.TF_STATE_SA }} \
             --resource-group ${{ inputs.TF_STATE_RG }} \
             --ip-address ${{ steps.get_ip.outputs.runner_ip }} \
-            --output none
-          # Wait for firewall rule to propagate
-          sleep 30
+            --output none; then
+            echo "ERROR: Failed to add firewall rule"
+            exit 1
+          fi
+          
+          echo "Firewall rule added successfully. Waiting for propagation and verifying..."
+          
+          # Wait and verify the rule exists with retries
+          MAX_VERIFY_RETRIES=12
+          VERIFY_COUNT=0
+          
+          while [ $VERIFY_COUNT -lt $MAX_VERIFY_RETRIES ]; do
+            sleep 10
+            
+            if az storage account network-rule list \
+              --account-name ${{ inputs.TF_STATE_SA }} \
+              --resource-group ${{ inputs.TF_STATE_RG }} \
+              --query "ipRules[?ipAddressOrRange=='${{ steps.get_ip.outputs.runner_ip }}']" \
+              --output tsv | grep -q "${{ steps.get_ip.outputs.runner_ip }}"; then
+              echo "Firewall rule verified and active"
+              exit 0
+            fi
+            
+            VERIFY_COUNT=$((VERIFY_COUNT + 1))
+            echo "Attempt $((VERIFY_COUNT)) - Firewall rule not yet active, waiting..."
+          done
+          
+          echo "WARNING: Firewall rule may not be fully propagated, but continuing..."
 
       - name: OpenTofu Initialize
         working-directory: ${{ inputs.WORKING_DIR }}
@@ -157,10 +208,27 @@ jobs:
           retention-days: 7
 
       - name: Remove Firewall Rule from Storage Account
-        if: always()
+        if: always() && steps.get_ip.outputs.runner_ip != ''
         run: |
-          az storage account network-rule remove \
+          echo "Removing firewall rule for IP: ${{ steps.get_ip.outputs.runner_ip }}"
+          
+          # Check if the rule exists before attempting removal
+          if az storage account network-rule list \
             --account-name ${{ inputs.TF_STATE_SA }} \
             --resource-group ${{ inputs.TF_STATE_RG }} \
-            --ip-address ${{ steps.get_ip.outputs.runner_ip }} \
-            --output none
+            --query "ipRules[?ipAddressOrRange=='${{ steps.get_ip.outputs.runner_ip }}']" \
+            --output tsv | grep -q "${{ steps.get_ip.outputs.runner_ip }}"; then
+            
+            echo "Firewall rule found, removing..."
+            if az storage account network-rule remove \
+              --account-name ${{ inputs.TF_STATE_SA }} \
+              --resource-group ${{ inputs.TF_STATE_RG }} \
+              --ip-address ${{ steps.get_ip.outputs.runner_ip }} \
+              --output none; then
+              echo "Firewall rule removed successfully"
+            else
+              echo "WARNING: Failed to remove firewall rule, but continuing..."
+            fi
+          else
+            echo "No firewall rule found for this IP, skipping removal"
+          fi

@@ -38,6 +38,9 @@ on:
         required: true
       AZURE_SUBSCRIPTION_ID:
         required: true
+      TF_VAR_SECRET:
+        description: 'OpenTofu secret variables in format: -var=variable1=${secret1} -var=variable2=${secret2}'
+        required: false
     outputs:
       plan_changes:
         description: "Indicates if the OpenTofu plan has changes"
@@ -179,7 +182,19 @@ jobs:
         timeout-minutes: 15
         run: |
           echo "Running tofu plan on ${{ inputs.WORKING_DIR }}"
-          tofu plan -out=tfplan -detailed-exitcode || exit_code=$?
+
+          # Build the plan command with optional secret variables
+          PLAN_CMD="tofu plan -out=tfplan -detailed-exitcode"
+
+          # Add secret variables if provided
+          if [ -n "${{ secrets.TF_VAR_SECRET }}" ]; then
+            echo "Adding secret variables to plan command"
+            PLAN_CMD="$PLAN_CMD ${{ secrets.TF_VAR_SECRET }}"
+          fi
+
+          echo "Executing: $PLAN_CMD"
+          eval "$PLAN_CMD" || exit_code=$?
+
           if [ $exit_code -eq 1 ]; then
             echo "OpenTofu plan failed"
             exit 1

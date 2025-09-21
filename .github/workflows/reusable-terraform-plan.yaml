@@ -38,6 +38,9 @@ on:
         required: true
       AZURE_SUBSCRIPTION_ID:
         required: true
+      TF_VAR_SECRET:
+        description: 'Terraform secret variables, one per line in format: -var=variable1=${secret1}'
+        required: false
     outputs:
       plan_changes:
         description: "Indicates if the Terraform plan has changes"
@@ -179,7 +182,28 @@ jobs:
         timeout-minutes: 15
         run: |
           echo "Running terraform plan on ${{ inputs.WORKING_DIR }}"
-          terraform plan -out=tfplan -detailed-exitcode || exit_code=$?
+
+          # Build the plan command with optional secret variables
+          PLAN_ARGS=()
+
+          # Add secret variables if provided
+          if [ -n "${{ secrets.TF_VAR_SECRET }}" ]; then
+            echo "Processing secret variables..."
+
+            # Read each line and add as separate arguments
+            while IFS= read -r line; do
+              if [ -n "$line" ] && [[ "$line" =~ ^-var= ]]; then
+                echo "Adding variable: ${line%=*}=***"
+                PLAN_ARGS+=("$line")
+              elif [ -n "$line" ]; then
+                echo "Warning: Skipping invalid variable format: $line"
+              fi
+            done <<< "${{ secrets.TF_VAR_SECRET }}"
+          fi
+
+          echo "Executing: terraform plan -out=tfplan -detailed-exitcode ${PLAN_ARGS[*]}"
+          terraform plan -out=tfplan -detailed-exitcode "${PLAN_ARGS[@]}" || exit_code=$?
+
           if [ $exit_code -eq 1 ]; then
             echo "Terraform plan failed"
             exit 1

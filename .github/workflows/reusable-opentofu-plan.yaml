@@ -39,7 +39,7 @@ on:
       AZURE_SUBSCRIPTION_ID:
         required: true
       TF_VAR_SECRET:
-        description: 'OpenTofu secret variables in format: -var=variable1=${secret1} -var=variable2=${secret2}'
+        description: 'OpenTofu secret variables, one per line in format: -var=variable1=${secret1}'
         required: false
     outputs:
       plan_changes:
@@ -184,16 +184,25 @@ jobs:
           echo "Running tofu plan on ${{ inputs.WORKING_DIR }}"
 
           # Build the plan command with optional secret variables
-          PLAN_CMD="tofu plan -out=tfplan -detailed-exitcode"
+          PLAN_ARGS=()
 
           # Add secret variables if provided
           if [ -n "${{ secrets.TF_VAR_SECRET }}" ]; then
-            echo "Adding secret variables to plan command"
-            PLAN_CMD="$PLAN_CMD ${{ secrets.TF_VAR_SECRET }}"
+            echo "Processing secret variables..."
+
+            # Read each line and add as separate arguments
+            while IFS= read -r line; do
+              if [ -n "$line" ] && [[ "$line" =~ ^-var= ]]; then
+                echo "Adding variable: ${line%=*}=***"
+                PLAN_ARGS+=("$line")
+              elif [ -n "$line" ]; then
+                echo "Warning: Skipping invalid variable format: $line"
+              fi
+            done <<< "${{ secrets.TF_VAR_SECRET }}"
           fi
 
-          echo "Executing: $PLAN_CMD"
-          eval "$PLAN_CMD" || exit_code=$?
+          echo "Executing: tofu plan -out=tfplan -detailed-exitcode ${PLAN_ARGS[*]}"
+          tofu plan -out=tfplan -detailed-exitcode "${PLAN_ARGS[@]}" || exit_code=$?
 
           if [ $exit_code -eq 1 ]; then
             echo "OpenTofu plan failed"
